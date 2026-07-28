@@ -9,20 +9,9 @@ import pyproj
 from collections import defaultdict
 from shapely.geometry import LineString
 from pypower.api import ppoption, runpf
-# from protos.wolong.elec.input.v1 import (  # pylint: disable=import-error
-#     input_pb2 as input_pb,  # pylint: disable=import-error
-# )  # pylint: disable=import-error
 import pycityproto.city.elec.input.v1.input_pb2 as input_pb
 import copy
-import pdb
 np.set_printoptions(suppress=True)
-# projector = pyproj.Proj(
-#     "+proj=utm +zone=50 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
-# )
-# projector at beijing
-projector = pyproj.Proj(
-    "+lon_0=116.391 +lat_0=39.904 +proj=utm +zone=50 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
-)
 BASE = 100000000
 UPPER_220 = 1.4
 UPPER_POWER = 1.5
@@ -39,9 +28,10 @@ class Flow(object):
         else:
             self.input_data = input_fp
 
-        self.projector = pyproj.Proj(
-            "+proj=utm +zone=50 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
-        )
+        # The empirical study projection is private-data metadata and is read
+        # from flow_config.yaml. EPSG:3857 is a portable fallback for synthetic
+        # examples; empirical reproduction should specify `projection`.
+        self.projector = pyproj.Proj(config.get("projection", "EPSG:3857"))
         self.elec_geojson = self.get_elec_json()
         self.init_config()
         self.init_relation()
@@ -86,7 +76,7 @@ class Flow(object):
                 line = geo_data["geometry"]["coordinates"]
                 proj_line = []
                 for l in line:
-                    proj_line.append(projector(l[0], l[1]))
+                    proj_line.append(self.projector(l[0], l[1]))
 
                 edge_dict[relation] = LineString(proj_line)
                 assert edge_dict[relation].is_valid

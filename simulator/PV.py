@@ -1,7 +1,6 @@
 # task/pv.py
 import numpy as np
-import sys
-sys.path.append("/data1/energy_data/lisb_PV_planning/agent/tools")
+import inspect
 from flow import Flow, get_generator_power
 from RL_env_v2 import myenv, calculate_grid_cost
 
@@ -47,10 +46,19 @@ class PVTaskExecutor:
         self.target_pv = target_pv
         self.features = features
 
-    def build_inputs(self, env, flow):
+    def build_inputs(self, env, flow, action=None):
+        features = self.features
+        if action is not None:
+            signature = inspect.signature(action)
+            features = [
+                name
+                for name, parameter in signature.parameters.items()
+                if parameter.kind
+                in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            ]
         args = []
         for i in range(len(env.location)):
-            args.append(fetch_data(i, env, self.features))
+            args.append(fetch_data(i, env, features))
         return args
 
     def analysis_result(self, result, env, flow, mask):
@@ -78,7 +86,10 @@ class PVTaskExecutor:
     def post_process(self, action_result, env, flow, mask):
         print("Statistic of Result:", np.mean(action_result), np.std(action_result), np.min(action_result), np.max(action_result))
         plan = np.array(action_result)
-        plan = plan / np.max(plan)
+        max_value = np.max(plan)
+        if not np.isfinite(max_value) or max_value <= 0:
+            raise ValueError("Action must produce at least one positive finite value")
+        plan = plan / max_value
         plan, _ = binary_search(plan, self.target_pv, env, mask)
         # print(plan)
         np.save("plan.npy", plan)
@@ -93,10 +104,11 @@ class PVTaskExecutor:
             metrics[f"fitness_power_plant_{i}"] = -1 * sim_result["unit_ramping_cost"][i] + 6
 
         ori_plan = sim_result["ori_plan"]
-        mean, std, min, max = np.mean(ori_plan), np.std(ori_plan), np.min(ori_plan), np.max(ori_plan)
-        metrics["Numerical_stability"] = 1 if (mean < 95 and mean > 5) else 0
+        mean, std = np.mean(ori_plan), np.std(ori_plan)
+        min_value, max_value = np.min(ori_plan), np.max(ori_plan)
+        metrics["Numerical_stability"] = 1 if np.all(np.isfinite(ori_plan)) and std > 1e-8 else 0
         metrics["Power_grid_score"] = 10 - np.sum(ramping_cost) / 4 / 1e4
         metrics["combined_score"] = metrics["Power_grid_score"] + metrics["Numerical_stability"]
 
-        artifact = {"INFO": "We aim at increase the fitness score of every power plant, therefore achieve a lower cost of the whole system.","STATISTIC_INFO": f"Mean action: {mean}, std: {std}, min: {min}, max: {max}."}
+        artifact = {"INFO": "We aim at increase the fitness score of every power plant, therefore achieve a lower cost of the whole system.","STATISTIC_INFO": f"Mean action: {mean}, std: {std}, min: {min_value}, max: {max_value}."}
         return metrics, artifact

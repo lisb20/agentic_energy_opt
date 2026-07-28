@@ -17,14 +17,16 @@ import base64
 import pickle
 import copy
 import json
+from pathlib import Path
 
-sys.path.append("/data1/energy_data/lisb_PV_planning/agent/tools")
+RELEASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(RELEASE_DIR / "simulator"))
 from flow import Flow, get_generator_power
 from RL_env_v2 import myenv, calculate_grid_cost
 
 import time
 
-def run_with_timeout(func, args=(), kwargs={}, timeout_seconds=5):
+def run_with_timeout(func, args=(), kwargs=None, timeout_seconds=5):
     """
     Run a function with a timeout using concurrent.futures
 
@@ -38,7 +40,7 @@ def run_with_timeout(func, args=(), kwargs={}, timeout_seconds=5):
         Result of the function or raises TimeoutError
     """
     results = []
-    for arg in kwargs:
+    for arg in kwargs or []:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(func, **arg)
             try:
@@ -58,8 +60,9 @@ def evaluate(program_path):
     """
     print("EVALUATOR: Evaluating program", program_path)
     try:
-        if os.path.exists("../cache/state_to_opt.pkl"):
-            with open("../cache/state_to_opt.pkl", "rb") as f:
+        state_path = RELEASE_DIR / "cache" / "state_to_opt.pkl"
+        if state_path.exists():
+            with state_path.open("rb") as f:
                 cache_env = pickle.load(f)
                 
             env = cache_env["env"]
@@ -74,24 +77,18 @@ def evaluate(program_path):
             elif domain == "V2G":
                 from V2G import V2GTaskExecutor
                 executor = V2GTaskExecutor(**task_specific_args)
-        else: 
-            print("WARNING: Failed to load environment, using default values")
-            flow_config = "xxxconfig.yaml"
-            config = yaml.safe_load(open(flow_config, "r"))
-            flow_data = "xxx.json"
-            env = myenv()
-            flow = Flow(config, flow_data)
-            mask = np.ones((803,))
-            
-            task_specific_args = {
-                "target_pv": 57500,
-                "features": ["lon", "lat", "demand_profile", "solar_profile", "rooftop_area", "closest_PP_id"]
-            }
+        else:
+            raise FileNotFoundError(
+                f"Optimization state not found: {state_path}. Start optimization through the MCP tool first."
+            )
             
 
     except Exception as e:
         print(f"Error: {str(e)}")
-        exit(1)
+        return EvaluationResult(
+            metrics={"combined_score": -20, "error": "InitializationError"},
+            artifacts={"error_type": type(e).__name__, "error_message": str(e)},
+        )
     try:
         # Load the program
         spec = importlib.util.spec_from_file_location("program", program_path)
@@ -133,7 +130,7 @@ def evaluate(program_path):
         )
     
     try:
-        inputs_args = executor.build_inputs(env, flow)
+        inputs_args = executor.build_inputs(env, flow, action=program.Action)
         result = run_with_timeout(func = program.Action, kwargs= inputs_args, timeout_seconds=100)
         sim_result = executor.post_process(result, env, flow, mask)
         sim_result = executor.analysis_result(sim_result, env, flow, mask)
@@ -161,10 +158,9 @@ def evaluate(program_path):
 
 
 if __name__ == "__main__":
-    result = evaluate("/data1/energy_data/lisb_PV_planning/agent/MA_evolve/openevolve_output_575k_0129/best/best_program.py")
-    # result = evaluate("/data1/energy_data/lisb_PV_planning/agent/MA_evolve/LLM_direct.py")
+    if len(sys.argv) != 2:
+        raise SystemExit("Usage: python evaluator.py PROGRAM_PATH")
+    result = evaluate(sys.argv[1])
     print(result.metrics)
-    value = (10 - result.metrics["Power_grid_score"]) * 10000
-    print(value)
     
     

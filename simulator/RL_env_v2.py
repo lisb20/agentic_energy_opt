@@ -6,8 +6,11 @@ import yaml
 import torch
 import json
 from EV_sim import EV_simulator
+from pathlib import Path
 
 BASE = 1e8
+RELEASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = Path(os.getenv("DATA_DIR", RELEASE_DIR / "data")).expanduser().resolve()
 
 
 def calculate_grid_cost(P_gen):
@@ -43,10 +46,10 @@ class myenv:
     def __init__(
         self,
         num_agents=803,
-        topo_path="path to the topology",
-        power_path="path to the power demand",
-        solar_path="path to the solar power",
-        trans_2_area="path to the trans_2_area",
+        topo_path=DATA_DIR / "topology.json",
+        power_path=DATA_DIR / "power_demand.npy",
+        solar_path=DATA_DIR / "solar_profile.npy",
+        trans_2_area=DATA_DIR / "region_area.pkl",
         EV_driving_power=None,
         EV_location=None,
         Nev=200000,
@@ -98,7 +101,7 @@ class myenv:
             self.PV_load = np.sum(self.solar_power, axis=0) * 1000
             self.default_V2G_target = np.mean(self.tot_load - self.PV_load) + self.PV_load - self.tot_load
             self.default_V2G_target *= -1
-
+            np.save("./V2G_target.npy", self.default_V2G_target)
             self.N_ev_station = np.zeros((self.N_agent, 96))
 
             for t in range(96):
@@ -120,11 +123,8 @@ class myenv:
                 if x["properties"]["id"] // BASE == 4
             ]
         )
-        closest_power_plant = json.load(
-            open(
-                "path to closest_generator.json"
-            )
-        )
+        with open(DATA_DIR / "closest_generator.json", "r") as f:
+            closest_power_plant = json.load(f)
         self.closest_power_plant = {
             int(k): int(v - self.N_agent) for k, v in closest_power_plant.items()
         }
@@ -189,7 +189,13 @@ class myenv:
         self.ev_driving_power = self.ev_driving_power[:Nev, :]
         self.ev_location = self.ev_location[:Nev, :]
         self.Nev = Nev
-
+        self.EV_sim = EV_simulator(
+            EV_driving_power=self.ev_driving_power,
+            EV_location=self.ev_location,
+            N_ev_station=self.N_ev_station,
+            N_region=self.N_agent,
+        )
+        
     def set_V2G_target(self, target):
         self.default_V2G_target = target
 

@@ -1,7 +1,6 @@
 # task/pv.py
 import numpy as np
-import sys
-sys.path.append("/data1/energy_data/lisb_PV_planning/agent/tools")
+import inspect
 from flow import Flow, get_generator_power
 from RL_env_v2 import myenv, calculate_grid_cost
 
@@ -31,16 +30,27 @@ class V2GTaskExecutor:
         self.features = features
         self.Nev = N_ev
 
-    def build_inputs(self, env, flow):
+    def build_inputs(self, env, flow, action=None):
+        features = self.features
+        if action is not None:
+            signature = inspect.signature(action)
+            features = [
+                name
+                for name, parameter in signature.parameters.items()
+                if parameter.kind
+                in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            ]
         args = []
         for i in range(len(env.location)):
-            args.append(fetch_data(i, env, self.features))
+            args.append(fetch_data(i, env, features))
         return args
     
     def post_process(self, action_result, env, flow, mask):
         # set all nan to 0
         action_result = np.nan_to_num(action_result)
-        return np.array(action_result) * 1e3
+        solution = np.array(action_result) * 1e3
+        np.save("plan.npy", solution)
+        return solution
 
     def analysis_result(self, solution, env, flow, mask):
         V2G_power, NEV_node, ramping, satisfied = env.simulate_v2g(solution)

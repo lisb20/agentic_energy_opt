@@ -44,10 +44,75 @@ User request:
             ("human", task_parsing_prompt),
         ]
     result = llm.invoke(messages)
-    content = result.content
+    content = result.content.strip()
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1].rsplit("```", 1)[0]
     content = json.loads(content)
     return task_parsing_prompt, content
 
+
+def task_assignment(llm, task, agents):
+  
+    prompt =f"""
+We have the following parsed task:
+
+<task> """\
++ task +\
+"""</task>
+
+Available agents and their capabilities:
+
+<agents>"""\
++ agents +\
+"""</agents>
+
+Please generate an execution plan.
+
+Each step must include:
+- agent
+- intent (high-level, capability-aligned)
+- context (only task-relevant fields)
+
+Output format:
+{
+  "execution_plan": [
+    {  
+      "step": "step_number",
+      "agent": "agent_name",
+      "intent": "intent",
+      "context": "context"
+    }
+  ]
+}
+"""
+
+    system_prompt = """You are an Orchestrator for a multi-agent system.
+
+Your responsibility is to generate an execution plan at the agent-intent level.
+
+Rules:
+- You MUST NOT refer to any tool names or tool parameters.
+- You MUST NOT describe how an agent implements an intent.
+- You MUST NOT call the same agent in a row.
+- You MUST ONLY use the listed agents and their declared capabilities.
+- Your output MUST be valid JSON.
+- You MUST decide the execution order explicitly.
+"""
+
+
+    messages = [
+            (
+                "system",
+                system_prompt,
+            ),
+            ("human", prompt),
+        ]
+    print(prompt)
+    response = llm.invoke(messages)
+    print(response.content)
+    plan = json.loads(response.content)
+    
+    return prompt, plan
 
 def describe_agent(opt_tools,sim_tools):
     opt_tools = [x.name for x in opt_tools]

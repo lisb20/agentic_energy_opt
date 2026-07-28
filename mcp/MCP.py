@@ -2,9 +2,17 @@
 from fastmcp import FastMCP
 import asyncio
 import sys
+import os
+from pathlib import Path
 
-# add path
-sys.path.append("/data1/energy_data/lisb_PV_planning/agent/tools")
+RELEASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = Path(os.getenv("DATA_DIR", RELEASE_DIR / "data")).expanduser().resolve()
+SIMULATOR_DIR = RELEASE_DIR / "simulator"
+MCP_DIR = Path(__file__).resolve().parent
+EVOLVE_DIR = RELEASE_DIR / "evolve"
+sys.path.insert(0, str(SIMULATOR_DIR))
+sys.path.insert(0, str(MCP_DIR))
+sys.path.insert(0, str(EVOLVE_DIR))
 from flow import Flow, get_generator_power
 from RL_env_v2 import myenv
 from RL_env_v2 import calculate_grid_cost as calculate_grid_cost_source
@@ -16,8 +24,10 @@ import json
 
 MODEL = "Qwen/Qwen3-8B"
 LLM = OpenAI(
-    api_key="sk-wymrwwfjljemycwylawaypaaxefkihtrbbxicnfwlrnybvtu",
-    base_url="https://api.siliconflow.cn/v1",
+    api_key=os.getenv("OPENAI_API_KEY", "not-set"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    timeout=60.0,
+    max_retries=0,
 )
 
 server = FastMCP("pv_sim_server")
@@ -30,37 +40,41 @@ def init(TASK_TYPE):
     """initialize the server"""
     print("CALLING <init>", "TASK_TYPE", TASK_TYPE)
     if TASK_TYPE == "PV":
-        flow_config = "/data1/energy_data/lisb_PV_planning/BEJ/flow/config.yaml"
-        config = yaml.safe_load(open(flow_config, "r"))
-        flow_data = (
-            "/data1/energy_data/lisb_PV_planning/BEJ/flow/elec_flow_input_map0221.json"
-        )
+        with (DATA_DIR / "flow_config.yaml").open("r") as f:
+            config = yaml.safe_load(f)
+        flow_data = DATA_DIR / "topology.json"
 
+        env = myenv(EV_driving_power=None, EV_location=None)
         GLOBAL_STATE = {
-            "env": myenv(EV_driving_power=None, EV_location=None),
-            "flow": Flow(config, flow_data),
+            "env": env,
+            "flow": Flow(config, str(flow_data)),
             "gen_power": np.zeros((25, 96)),
-            "power_demand": np.zeros((803, 96)),
+            "power_demand": env.get_power_demand(),
         }
     elif TASK_TYPE == "V2G":
-        flow_config = "/data1/energy_data/lisb_PV_planning/BEJ/flow/config.yaml"
-        config = yaml.safe_load(open(flow_config, "r"))
-        flow_data = (
-            "/data1/energy_data/lisb_PV_planning/BEJ/flow/elec_flow_input_map0221.json"
-        )
+        with (DATA_DIR / "flow_config.yaml").open("r") as f:
+            config = yaml.safe_load(f)
+        flow_data = DATA_DIR / "topology.json"
+
+        driving_power = os.getenv("V2G_DRIVING_POWER")
+        vehicle_locations = os.getenv("V2G_LOCATION")
+        if not driving_power or not vehicle_locations:
+            raise RuntimeError(
+                "V2G_DRIVING_POWER and V2G_LOCATION must point to the private mobility arrays"
+            )
 
         env = myenv(
-            topo_path="/data1/energy_data/lisb_PV_planning/BEJ/flow/elec_flow_input_map0221.json",
-            power_path="/data1/energy_data/lisb_PV_planning/BEJ/flow/power_map0221.npy",
-            EV_driving_power="/home/lisibo/v2g/opt_data_0221/Pd.npy",
-            EV_location="/home/lisibo/v2g/opt_data_0221/loc_mat.npy",
+            topo_path=flow_data,
+            power_path=DATA_DIR / "power_demand.npy",
+            EV_driving_power=driving_power,
+            EV_location=vehicle_locations,
             Nev=300000,
         )
         GLOBAL_STATE = {
             "env": env,
-            "flow": Flow(config, flow_data),
+            "flow": Flow(config, str(flow_data)),
             "gen_power": np.zeros((25, 96)),
-            "power_demand": np.zeros((803, 96)),
+            "power_demand": env.get_power_demand(),
         }
 
     return "init"
@@ -149,7 +163,7 @@ def load_V2G_from_file(fp):
     """load the V2G plan from a file"""
     print("CALLING <set_V2G_from_file> INPUT_ARGS: ", "fp ", fp)
     GLOBAL_STATE["env"].set_V2G_target(np.load(fp))
-    return "V2G set successfully from {fp}!"
+    return f"V2G set successfully from {fp}!"
 
 
 @server.tool(
@@ -198,9 +212,11 @@ task_description: str; the description of the task.
 )
 def optimize_by_alpha_evolve(number_ev=None, total_PV=None, domain=None, task_description=""):
     """optimize by the genetic algorithm"""
-    if number_ev is None:
+    if domain not in {"PV", "V2G"}:
+        raise ValueError("domain must be 'PV' or 'V2G'")
+    if domain == "V2G" and number_ev is None:
         number_ev = GLOBAL_STATE["env"].Nev
-    else:
+    elif domain == "V2G":
         GLOBAL_STATE["env"].set_N_ev(number_ev)
     if total_PV is None:
         total_PV = GLOBAL_STATE["env"].solar_power.sum()
@@ -210,20 +226,30 @@ def optimize_by_alpha_evolve(number_ev=None, total_PV=None, domain=None, task_de
     avail_feat = GLOBAL_STATE["env"].get_feature_info()
     from prompt import get_feat_prompt
 
-    p = get_feat_prompt.format(avail_feat=avail_feat, task_type="task_description")
-    result = LLM.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "user", "content": p},
-        ],
-        temperature=0.1,
-    )
-    result = json.loads(result.choices[0].message.content)
-    select_feat = result["selected_features"]
+    p = get_feat_prompt.format(avail_feat=avail_feat, task_type=task_description or domain)
+    default_features = {
+        "PV": ["lon", "lat", "demand_profile", "solar_profile", "rooftop_area", "closest_PP_id"],
+        "V2G": ["lon", "lat", "demand_profile", "target_pattern", "N_ev_node", "closest_PP_id"],
+    }
+    try:
+        result = LLM.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", MODEL),
+            messages=[{"role": "user", "content": p}],
+            temperature=0.1,
+            max_tokens=1024,
+            extra_body={"enable_thinking": False},
+        )
+        content = result.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0]
+        select_feat = json.loads(content)["selected_features"]
+    except Exception as exc:
+        print(f"Feature selection failed, using defaults: {exc}")
+        select_feat = default_features[domain]
     print("selected features: ", select_feat)
 
     if domain == "PV":
-        task_specific_args = {"total_PV": total_PV, "features": select_feat}
+        task_specific_args = {"target_pv": total_PV, "features": select_feat}
     elif domain == "V2G":
         task_specific_args = {"Nev": number_ev, "features": select_feat}
 
@@ -235,19 +261,33 @@ def optimize_by_alpha_evolve(number_ev=None, total_PV=None, domain=None, task_de
         "task_specific_args": task_specific_args,
     }
 
-    with open("../cache/state_to_opt.pkl", "wb") as f:
+    cache_dir = RELEASE_DIR / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with (cache_dir / "state_to_opt.pkl").open("wb") as f:
         pickle.dump(state_to_opt, f)
 
     import subprocess
 
+    run_env = os.environ.copy()
+    run_env["DOMAIN"] = domain
     result = subprocess.run(
-        ["bash", "path to/run.sh"],
+        ["bash", str(RELEASE_DIR / "evolve" / "run.sh")],
+        cwd=RELEASE_DIR / "evolve",
+        env=run_env,
         capture_output=True,
         text=True,
         check=True
     )
 
-    best_popu = np.load("path to alpha-evolve result.npy")
+    best_program = RELEASE_DIR / "output" / "best" / "best_program.py"
+    if not best_program.exists():
+        raise FileNotFoundError(f"OpenEvolve did not create {best_program}")
+    sys.path.insert(0, str(RELEASE_DIR / "openevolve"))
+    from evaluator import evaluate
+    evaluation = evaluate(str(best_program))
+    if "error" in evaluation.metrics:
+        raise RuntimeError(f"Best program evaluation failed: {evaluation.artifacts}")
+    best_popu = np.load(RELEASE_DIR / "evolve" / "plan.npy")
     if domain == "V2G":
         V2G_power, NEV_node, ramping, satisfied = GLOBAL_STATE["env"].simulate_v2g(
             best_popu
@@ -259,19 +299,20 @@ def optimize_by_alpha_evolve(number_ev=None, total_PV=None, domain=None, task_de
     GLOBAL_STATE["gen_power"] = get_generator_power(
         GLOBAL_STATE["flow"], GLOBAL_STATE["power_demand"]
     )
-    V2G_storage = np.sum(V2G_power[V2G_power > 0])
+    V2G_storage = np.sum(V2G_power[V2G_power > 0]) / 1e3 if domain == "V2G" else 0.0
     cost = calculate_grid_cost_source(GLOBAL_STATE["gen_power"]) / 4
     return {
         "V2G storage (MWh)": V2G_storage,
         "Operation cost ($)": np.sum(cost),
-        "info": "V2G problem, alpha evolve optimized successfully!",
+        "info": f"{domain} problem optimized successfully by alpha-evolve",
         "select_feat": select_feat,
     }
 
 
 def main():
     # await server.run_stdio_async()  # 使用 STDIO 作为通信管道
-    server.run(transport="http", host="127.0.0.1", port=13579)  # 使用 HTTP 作为通信管道
+    port = int(os.getenv("MCP_PORT", "13579"))
+    server.run(transport="http", host="127.0.0.1", port=port)  # 使用 HTTP 作为通信管道
 
 
 if __name__ == "__main__":

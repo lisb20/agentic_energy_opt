@@ -12,7 +12,7 @@ llm:
   # secondary_model: "llama-4-scout-17b-16e-instruct"
   # secondary_model: "gpt-5-nano"
   secondary_model_weight: 0
-  api_base: "https://api.siliconflow.cn/v1"
+  api_base: "https://api.openai.com/v1"
   # api_base: "https://api.cerebras.ai/v1"
   # api_base: "https://api.openai.com/v1"
   temperature: 0.7
@@ -22,6 +22,7 @@ llm:
 # Prompt configuration
 prompt:
   system_message: "You are an expert programmer specializing in urban energy system. You target is to plan the depolyment of rooftop photovaltic in the city. We will simulate the power demand via Power Flow, and calculate the fitness score at power plants. You need to maximize the combined score (therefore minimize the cost) under the fixed total PV generation."
+  # (V2G) "You are an expert programmer specializing in urban energy system. You target is to plan the depolyment of vehicle-to-grid (V2G) in the city. We will simulate the power demand via Power Flow, and calculate the grid operation cost at power plants. You need to minimize the ramping costs by coordinate the charging and discharging of vehicles. "
 
   num_top_programs: 2                 # Number of top-performing programs to include
   num_diverse_programs: 2  
@@ -33,7 +34,7 @@ prompt:
 
 # Database configuration
 database:
-  population_size: 1000
+  population_size: 100
   archive_size: 100
   num_islands: 5
   migration_interval: 50            # Migrate every 50 generations

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.npy
+*.pkl
+*.jsonl
+cache/
+output/
+logs/
+agent/logs/
+evolve/plan.npy
+data/*
+!data/README.md
